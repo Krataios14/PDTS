@@ -9,8 +9,9 @@ crack sizes in metres, life in cycles.
 from .allowables import a_basis, b_basis, basis_value, tolerance_factor
 from .fracture import (
     CenterCrack, CornerCrack, CustomGeometry, ParisLaw, SurfaceCrack,
-    ThroughCrack, WalkerLaw, critical_size, grow,
+    ThroughCrack, WalkerLaw, critical_size, grow, grow_spectrum,
 )
+from .spectrum import CycleClass, Spectrum, rainflow
 from .inspection import InspectionPlan, PODCurve, apply_plan, sweep_intervals
 from .random_vars import (
     Deterministic, Gumbel, Lognormal, Normal, Uniform, Weibull, from_spec,

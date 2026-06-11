@@ -206,22 +206,79 @@ def grow(a0, delta_sigma, geometry, law, k_ic, stress_ratio=0.0,
     s_max = delta_sigma / (1.0 - stress_ratio)
     a_c = critical_size(geometry, s_max, k_ic)
 
+    def rate_of(a_grid, sl):
+        dk = geometry.y(a_grid) * delta_sigma[sl][:, None] * np.sqrt(np.pi * a_grid)
+        return law.rate(dk, stress_ratio, a=a_grid, kc=k_ic[sl][:, None],
+                        sample_slice=sl)
+
+    return _integrate(a0, a_c, rate_of, eval_cycles, n_grid, chunk_size)
+
+
+def grow_spectrum(a0, spectrum, geometry, law, k_ic, stress_scale=1.0,
+                  eval_blocks=None, n_grid=250, chunk_size=100_000):
+    """Integrate crack growth under a repeating load spectrum.
+
+    spectrum     : object with .classes, an iterable of cycle classes
+                   carrying delta_sigma [MPa], stress_ratio and count
+                   (cycles per block), e.g. spectrum.Spectrum
+    stress_scale : per-sample multiplier on every stress in the spectrum,
+                   the natural place for load scatter (scalar or (n,))
+    eval_blocks  : block counts at which to record crack size
+
+    Life comes back in BLOCKS (e.g. flights), not cycles. With no load
+    interaction modelled, the order of cycles inside a block does not
+    change the integral, so the block growth rate is the count-weighted
+    sum of the class rates and the same a-grid integration applies.
+    """
+    a0 = np.atleast_1d(np.asarray(a0, dtype=float))
+    n = a0.shape[0]
+    k_ic = np.broadcast_to(np.asarray(k_ic, dtype=float), (n,))
+    stress_scale = np.broadcast_to(np.asarray(stress_scale, dtype=float), (n,))
+    if np.any(a0 <= 0):
+        raise ValueError("initial crack sizes must be positive")
+    classes = list(spectrum.classes)
+    if not classes:
+        raise ValueError("spectrum has no cycle classes")
+
+    # fracture is governed by the largest peak stress in the block
+    peak = getattr(spectrum, "peak_stress", None)
+    if peak is None:
+        peak = max(c.delta_sigma / (1.0 - c.stress_ratio) for c in classes)
+    a_c = critical_size(geometry, peak * stress_scale, k_ic)
+
+    def rate_of(a_grid, sl):
+        y = geometry.y(a_grid)
+        root = np.sqrt(np.pi * a_grid)
+        scale = stress_scale[sl][:, None]
+        kc = k_ic[sl][:, None]
+        v = np.zeros_like(a_grid)
+        for c in classes:
+            dk = y * scale * c.delta_sigma * root
+            v += c.count * law.rate(dk, c.stress_ratio, a=a_grid, kc=kc,
+                                    sample_slice=sl)
+        return v
+
+    return _integrate(a0, a_c, rate_of, eval_blocks, n_grid, chunk_size)
+
+
+def _integrate(a0, a_c, rate_of, eval_steps, n_grid, chunk_size):
+    n = a0.shape[0]
     n_f = np.empty(n)
-    eval_cycles = None if eval_cycles is None else np.asarray(eval_cycles, dtype=float)
-    a_at = None if eval_cycles is None else np.empty((n, eval_cycles.shape[0]))
+    eval_steps = None if eval_steps is None else np.asarray(eval_steps, dtype=float)
+    a_at = None if eval_steps is None else np.empty((n, eval_steps.shape[0]))
 
     for start in range(0, n, chunk_size):
         sl = slice(start, min(start + chunk_size, n))
-        _grow_chunk(a0[sl], delta_sigma[sl], a_c[sl], geometry, law,
-                    stress_ratio, n_grid, sl,
-                    n_f[sl], None if a_at is None else a_at[sl], eval_cycles)
+        _integrate_chunk(a0[sl], a_c[sl], rate_of, n_grid, sl,
+                         n_f[sl], None if a_at is None else a_at[sl],
+                         eval_steps)
 
     return LifeResult(cycles_to_failure=n_f, a_critical=a_c,
-                      eval_cycles=eval_cycles, a_at=a_at)
+                      eval_cycles=eval_steps, a_at=a_at)
 
 
-def _grow_chunk(a0, delta_sigma, a_c, geometry, law, stress_ratio,
-                n_grid, sample_slice, out_nf, out_a_at, eval_cycles):
+def _integrate_chunk(a0, a_c, rate_of, n_grid, sample_slice,
+                     out_nf, out_a_at, eval_cycles):
     m = a0.shape[0]
     burst = a_c <= a0                       # critical on arrival
 
@@ -230,8 +287,7 @@ def _grow_chunk(a0, delta_sigma, a_c, geometry, law, stress_ratio,
     t = np.linspace(0.0, 1.0, n_grid)[None, :]
     a_grid = np.exp(np.log(a0)[:, None] * (1.0 - t) + np.log(safe_ac)[:, None] * t)
 
-    dk = geometry.y(a_grid) * delta_sigma[:, None] * np.sqrt(np.pi * a_grid)
-    v = law.rate(dk, stress_ratio, sample_slice)
+    v = rate_of(a_grid, sample_slice)
 
     dormant = v[:, 0] <= 0.0                # below threshold at a0
     inv_v = np.where(v > 0.0, 1.0 / np.maximum(v, 1e-300), 0.0)
